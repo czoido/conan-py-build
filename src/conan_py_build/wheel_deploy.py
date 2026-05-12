@@ -37,8 +37,29 @@ def move_deploy_to_wheel(deploy_folder: Path, staging_dir: Path) -> None:
         shutil.copytree(deploy_folder, pkg_dir, dirs_exist_ok=True)
 
 
+def _is_shared_library(path: Path) -> bool:
+    """True if *path* is a real shared library we should patch (not a symlink)."""
+    if path.is_symlink() or not path.is_file():
+        return False
+    if sys.platform == "darwin":
+        return path.suffix == ".dylib"
+    if sys.platform == "linux":
+        # Match .so and versioned forms like libfoo.so.2 or libfoo.so.2.6.1.
+        return ".so" in path.suffixes
+    return False
+
+
 def patch_rpath(staging_dir: Path) -> None:
-    """macOS/Linux: add ``@loader_path`` / ``$ORIGIN`` to extension ``.so`` files."""
+    """Add ``@loader_path`` / ``$ORIGIN`` rpath to every shared lib that sits
+    next to a Python extension.
+
+    Patching only the extension modules is not enough on Linux: ``DT_RUNPATH``
+    (the GNU default since glibc 2.30) is not inherited across transitive
+    library loads. If ``_ext.so`` has rpath ``$ORIGIN`` and loads
+    ``libfoo.so`` (bundled next to it), ``libfoo``'s own deps will not be
+    looked up via ``_ext``'s rpath — ``libfoo`` needs its own ``$ORIGIN`` too.
+    On macOS the same applies via ``@loader_path``.
+    """
     if sys.platform == "darwin":
         rpath = "@loader_path"
         patcher = "install_name_tool"
@@ -50,22 +71,29 @@ def patch_rpath(staging_dir: Path) -> None:
     else:
         return
 
+    targets: set[Path] = set()
+    for pkg_dir in _package_dirs_with_native_extensions(staging_dir):
+        for path in pkg_dir.iterdir():
+            if _is_shared_library(path) or _is_python_extension_module(path):
+                targets.add(path)
+
     warned = False
-    for path in staging_dir.rglob("*.so"):
-        if _is_python_extension_module(path):
-            try:
-                subprocess.run(
-                    [patcher, *arguments, str(path)],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-            except FileNotFoundError:
+    for path in targets:
+        try:
+            subprocess.run(
+                [patcher, *arguments, str(path)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            if not warned:
                 print(
-                    f"WARNING: {patcher} not found. Python extension {path.name} may not load "
-                    f"shared libs. Install {patcher} or run auditwheel repair on the wheel {path.name}.",
+                    f"WARNING: {patcher} not found. Bundled shared libs and Python "
+                    f"extensions in the wheel may fail to load their transitive deps. "
+                    f"Install {patcher} or run auditwheel repair on the wheel.",
                     flush=True,
                 )
                 warned = True
-            except subprocess.CalledProcessError:
-                pass
+        except subprocess.CalledProcessError:
+            pass

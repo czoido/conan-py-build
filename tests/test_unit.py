@@ -145,6 +145,44 @@ def test_patch_rpath(tmp_path, monkeypatch):
     ]
 
 
+def test_patch_rpath_patches_bundled_shared_libs_too(tmp_path, monkeypatch):
+    """Linux: libgdal.so.38 next to an extension must also get $ORIGIN, otherwise
+    its transitive deps fail to resolve at load time (DT_RUNPATH is not inherited)."""
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: calls.append(cmd) or subprocess.CompletedProcess(cmd, 0, b"", b""))
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    pkg = tmp_path / "staging" / "rasterio"
+    pkg.mkdir(parents=True)
+    ext = pkg / "_base.cpython-312-x86_64-linux-gnu.so"
+    libgdal = pkg / "libgdal.so.38"
+    libiconv = pkg / "libiconv.so.2.6.1"
+    libiconv_link = pkg / "libiconv.so"
+    plain_so = pkg / "libdep.so"
+    for f in (ext, libgdal, libiconv, plain_so):
+        f.write_text("bin")
+    libiconv_link.symlink_to(libiconv)
+
+    patch_rpath(tmp_path / "staging")
+    patched = {cmd[-1] for cmd in calls}
+    assert patched == {str(ext), str(libgdal), str(libiconv), str(plain_so)}
+    # Symlinks are skipped (patchelf cannot handle them).
+    assert str(libiconv_link) not in patched
+
+
+def test_patch_rpath_skips_dirs_without_extensions(tmp_path, monkeypatch):
+    """Dirs that contain no Python extension are not scanned at all."""
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: calls.append(cmd) or subprocess.CompletedProcess(cmd, 0, b"", b""))
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    (tmp_path / "staging" / "data_only").mkdir(parents=True)
+    (tmp_path / "staging" / "data_only" / "README.txt").write_text("hello")
+
+    patch_rpath(tmp_path / "staging")
+    assert calls == []
+
+
 def test_move_deploy_to_wheel_copies_shared_libs_next_to_extension(tmp_path):
     deploy = tmp_path / "deploy"
     deploy.mkdir()
