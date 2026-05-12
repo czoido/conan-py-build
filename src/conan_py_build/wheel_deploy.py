@@ -29,12 +29,20 @@ def _package_dirs_with_native_extensions(staging_dir: Path) -> set[Path]:
 
 
 def move_deploy_to_wheel(deploy_folder: Path, staging_dir: Path) -> None:
-    """Merge ``runtime_deploy`` into each package dir that has a native extension."""
+    """Merge ``runtime_deploy`` into each package dir that has a native extension.
+
+    ``symlinks=True`` preserves the libfoo.so → libfoo.so.N → libfoo.so.N.M.K
+    chain that Conan emits. Without it, ``shutil.copytree`` resolves each link
+    into a full copy of the target, which (a) bloats the wheel and (b) confuses
+    wheel post-processors like ``auditwheel`` that look up libraries by
+    ``DT_SONAME`` — multiple identical files with the same SONAME become
+    ambiguous.
+    """
     if not deploy_folder.is_dir() or not any(deploy_folder.iterdir()):
         return
 
     for pkg_dir in _package_dirs_with_native_extensions(staging_dir):
-        shutil.copytree(deploy_folder, pkg_dir, dirs_exist_ok=True)
+        shutil.copytree(deploy_folder, pkg_dir, dirs_exist_ok=True, symlinks=True)
 
 
 def _is_shared_library(path: Path) -> bool:
