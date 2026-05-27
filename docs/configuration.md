@@ -199,18 +199,28 @@ wheel `.dist-info/licenses/` and sdist PKG-INFO.
 
 ## Shared libraries
 
-If your extension links to Conan-provided shared
-libraries, the backend copies them next to the
-extension after the build and patches RPATH so they
-resolve at runtime:
+The backend bundles Conan-provided shared libraries into
+the wheel and patches `$ORIGIN` / `@loader_path` RPATH
+on every bundled `.so` / `.dylib`.
 
-- **macOS** — adds `@loader_path` via `install_name_tool`
-- **Linux** — adds `$ORIGIN` via `patchelf`
-- **Windows** — no patching needed, DLLs placed
-  next to the `.pyd` are found automatically
+If your dependency chain includes **OpenSSL**
+(e.g. via `libcurl`, `gRPC`, `libpq`), bundling without
+SONAME mangling can cause an `ImportError` at import
+time. Run the wheel-repair tool for your platform:
 
-No configuration is needed: the backend detects shared
-libraries automatically from the Conan deploy output.
+```bash
+# Linux
+pip wheel . -w dist/
+auditwheel repair dist/*.whl -w dist-repaired/
+pip install dist-repaired/*.whl
+```
+
+- **Linux** — [`auditwheel repair`](https://github.com/pypa/auditwheel)
+- **macOS** — [`delocate-wheel`](https://github.com/matthew-brett/delocate)
+- **Windows** — [`delvewheel repair`](https://github.com/adang1345/delvewheel)
+
+[`cibuildwheel`](https://cibuildwheel.pypa.io/) invokes
+the right tool automatically.
 
 ## Sdist defaults
 

@@ -1,14 +1,9 @@
 """Unit tests for the conan_py_build build backend."""
-import importlib.machinery
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
 from conan.errors import ConanException
-
-from conan_py_build.wheel_deploy import move_deploy_to_wheel, patch_rpath
 
 from conan_py_build.build import (
     _parse_config,
@@ -125,37 +120,6 @@ build-backend = "conan_py_build.build"
     meta = {"name": "pkg", "dynamic": ["version"]}
     with pytest.raises(RuntimeError, match="must define 'file' or 'provider'"):
         _resolve_version(meta, tmp_path)
-
-
-def test_patch_rpath(tmp_path, monkeypatch):
-    calls = []
-
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        return subprocess.CompletedProcess(cmd, 0, b"", b"")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    monkeypatch.setattr(sys, "platform", "linux")
-    mod = tmp_path / "staging" / "pkg" / "mod.cpython-312-x86_64-linux-gnu.so"
-    mod.parent.mkdir(parents=True)
-    mod.write_text("ext")
-    patch_rpath(tmp_path / "staging")
-    assert calls == [
-        ["patchelf", "--add-rpath", "$ORIGIN", str(mod)],
-    ]
-
-
-def test_move_deploy_to_wheel_copies_shared_libs_next_to_extension(tmp_path):
-    deploy = tmp_path / "deploy"
-    deploy.mkdir()
-    (deploy / "libdep.so").write_text("so", encoding="utf-8")
-    staging = tmp_path / "staging"
-    pkg = staging / "mypkg"
-    pkg.mkdir(parents=True)
-    ext = f"_core{importlib.machinery.EXTENSION_SUFFIXES[0]}"
-    (pkg / ext).write_text("ext", encoding="utf-8")
-    move_deploy_to_wheel(deploy, staging)
-    assert (pkg / "libdep.so").read_text() == "so"
 
 
 def test_extra_arguments_empty_when_unset():

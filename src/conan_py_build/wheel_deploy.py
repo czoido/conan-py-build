@@ -38,34 +38,47 @@ def move_deploy_to_wheel(deploy_folder: Path, staging_dir: Path) -> None:
 
 
 def patch_rpath(staging_dir: Path) -> None:
-    """macOS/Linux: add ``@loader_path`` / ``$ORIGIN`` to extension ``.so`` files."""
-    if sys.platform == "darwin":
-        rpath = "@loader_path"
-        patcher = "install_name_tool"
-        arguments = ["-add_rpath", rpath]
-    elif sys.platform == "linux":
-        rpath = "$ORIGIN"
-        patcher = "patchelf"
-        arguments = ["--add-rpath", rpath]
-    else:
-        return
+    """Add $ORIGIN / @loader_path RPATH to all .so/.dylib files in staging_dir."""
+    if sys.platform == "linux":
+        _patch_rpath_linux(staging_dir)
+    elif sys.platform == "darwin":
+        _patch_rpath_darwin(staging_dir)
 
-    warned = False
+
+def _run_silent(cmd: list[str], warned: list[bool]) -> None:
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except FileNotFoundError:
+        if not warned[0]:
+            tool = cmd[0]
+            print(
+                f"WARNING: {tool} not found. Shared libs may not load correctly. "
+                f"Install {tool} for proper RPATH patching.",
+                flush=True,
+            )
+            warned[0] = True
+    except subprocess.CalledProcessError:
+        pass  # RPATH may already be set
+
+
+def _patch_rpath_linux(staging_dir: Path) -> None:
+    warned = [False]
     for path in staging_dir.rglob("*.so"):
+        if not path.is_file() or path.is_symlink():
+            continue
         if _is_python_extension_module(path):
-            try:
-                subprocess.run(
-                    [patcher, *arguments, str(path)],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-            except FileNotFoundError:
-                print(
-                    f"WARNING: {patcher} not found. Python extension {path.name} may not load "
-                    f"shared libs. Install {patcher} or run auditwheel repair on the wheel {path.name}.",
-                    flush=True,
-                )
-                warned = True
-            except subprocess.CalledProcessError:
-                pass
+            rpath = "$ORIGIN:$ORIGIN/lib"
+        else:
+            rpath = "$ORIGIN"
+        _run_silent(["patchelf", "--add-rpath", rpath, str(path)], warned)
+
+
+def _patch_rpath_darwin(staging_dir: Path) -> None:
+    warned = [False]
+    for pattern in ("*.so", "*.dylib"):
+        for path in staging_dir.rglob(pattern):
+            if not path.is_file() or path.is_symlink():
+                continue
+            _run_silent(["install_name_tool", "-add_rpath", "@loader_path", str(path)], warned)
+
+
