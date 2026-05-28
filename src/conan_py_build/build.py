@@ -613,8 +613,11 @@ def _do_build_wheel(
         dirs_exist_ok=True,
     )
 
-    move_deploy_to_wheel(runtime_deploy_dir, staging_dir)
+    # Add rpath to extension modules only, we are not touching shared libs from Conan.
     patch_rpath(staging_dir)
+
+    # Copy shared libs from Conan's runtime_deploy to the wheel layout.
+    move_deploy_to_wheel(runtime_deploy_dir, staging_dir)
 
     # Create dist-info (or reuse the one prepared by prepare_metadata_for_build_wheel)
     if metadata_directory is not None:
