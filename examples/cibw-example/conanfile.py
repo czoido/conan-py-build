@@ -13,7 +13,7 @@ class MyadderCibwConan(ConanFile):
 
     def requirements(self):
         self.requires("pybind11/3.0.1")
-        self.requires("spdlog/1.15.1")  # pulls in fmt/11.1.3 transitively
+        self.requires("spdlog/1.15.1")
 
     def build(self):
         cmake = CMake(self)

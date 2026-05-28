@@ -16,8 +16,7 @@ def _is_python_extension_module(path: Path) -> bool:
     for suf in importlib.machinery.EXTENSION_SUFFIXES:
         if not name.endswith(suf):
             continue
-        # Bare ".so" is shared by Python extensions and plain shared-lib stubs (libfmt.so).
-        # ABI-tagged suffixes (.cpython-*.so, .abi3.so) are unambiguous even with a lib* prefix.
+        # Bare ".so" is ambiguous: Python extensions and plain shared-lib stubs (libfmt.so) both use it.
         if suf == ".so" and name.startswith("lib"):
             return False
         return True
