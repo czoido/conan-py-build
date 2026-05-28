@@ -201,7 +201,7 @@ wheel `.dist-info/licenses/` and sdist PKG-INFO.
 
 The backend bundles Conan-provided shared libraries into
 the wheel and patches `$ORIGIN` / `@loader_path` RPATH
-on every bundled `.so` / `.dylib`.
+on the extension module so it can find them at runtime.
 
 If your dependency chain includes **OpenSSL**
 (e.g. via `libcurl`, `gRPC`, `libpq`), bundling without
