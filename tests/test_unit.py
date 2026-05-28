@@ -8,7 +8,7 @@ import pytest
 
 from conan.errors import ConanException
 
-from conan_py_build.wheel_deploy import move_deploy_to_wheel, patch_rpath
+from conan_py_build.wheel_deploy import mangle_sonames, move_deploy_to_wheel, patch_rpath
 
 from conan_py_build.build import (
     _parse_config,
@@ -466,3 +466,211 @@ build-backend = "conan_py_build.build"
     dist_info = tmp_path / "meta" / prepare_metadata_for_build_wheel(str(tmp_path / "meta"))
     assert (dist_info / "licenses" / "LICENSE").read_text() == "MIT"
     assert "License-File: LICENSE" in (dist_info / "METADATA").read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# mangle_sonames tests
+# ---------------------------------------------------------------------------
+
+def _make_staging_with_extension(tmp_path):
+    """Return (staging_dir, pkg_dir) with a real-named extension module."""
+    staging = tmp_path / "staging"
+    pkg = staging / "mypkg"
+    pkg.mkdir(parents=True)
+    ext_name = f"_core{importlib.machinery.EXTENSION_SUFFIXES[0]}"
+    (pkg / ext_name).write_bytes(b"\x7fELF" + b"\x00" * 16)
+    return staging, pkg
+
+
+def test_mangle_sonames_linux_calls_patchelf(tmp_path, monkeypatch):
+    staging, pkg = _make_staging_with_extension(tmp_path)
+    (pkg / "libfmt.so.12").write_bytes(b"ELF_DATA_LIBFMT")
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        stdout = ""
+        if "--print-soname" in cmd:
+            stdout = "libfmt.so.12\n"
+        elif "--print-needed" in cmd:
+            stdout = "libfmt.so.12\n"
+        return subprocess.CompletedProcess(cmd, 0, stdout, "")
+
+    calls_list = []
+
+    def recording_run(cmd, **kwargs):
+        calls_list.append(list(cmd))
+        return fake_run(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", recording_run)
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    mangle_sonames(staging)
+
+    cmd_names = [c[1] for c in calls_list if c[0] == "patchelf"]
+    assert "--print-soname" in cmd_names
+    assert "--set-soname" in cmd_names
+    assert "--replace-needed" in cmd_names
+
+
+def test_mangle_sonames_linux_renames_lib_with_hash(tmp_path, monkeypatch):
+    staging, pkg = _make_staging_with_extension(tmp_path)
+    lib = pkg / "libfmt.so.12"
+    lib.write_bytes(b"ELF_DATA_LIBFMT")
+
+    def fake_run(cmd, **kwargs):
+        stdout = "libfmt.so.12\n" if "--print-soname" in cmd else "libfmt.so.12\n"
+        return subprocess.CompletedProcess(cmd, 0, stdout, "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    mangle_sonames(staging)
+
+    remaining = list(pkg.iterdir())
+    names = [p.name for p in remaining]
+    assert not any(n == "libfmt.so.12" for n in names), "original name should be gone"
+    assert any("libfmt-" in n and n.endswith(".so.12") for n in names), "mangled name missing"
+
+
+def test_mangle_sonames_linux_no_bundled_libs_no_patchelf_calls(tmp_path, monkeypatch):
+    staging, pkg = _make_staging_with_extension(tmp_path)
+
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: calls.append(cmd) or subprocess.CompletedProcess(cmd, 0, "", ""))
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    mangle_sonames(staging)
+
+    assert calls == [], "no patchelf calls expected when no bundled libs are present"
+
+
+def test_mangle_sonames_linux_patchelf_not_found_no_crash(tmp_path, monkeypatch):
+    staging, pkg = _make_staging_with_extension(tmp_path)
+    (pkg / "libfmt.so.12").write_bytes(b"ELF_DATA_LIBFMT")
+
+    def raise_file_not_found(cmd, **kwargs):
+        raise FileNotFoundError("patchelf not found")
+
+    monkeypatch.setattr(subprocess, "run", raise_file_not_found)
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    mangle_sonames(staging)  # must not raise
+
+
+def test_mangle_sonames_darwin_calls_tools(tmp_path, monkeypatch):
+    staging, pkg = _make_staging_with_extension(tmp_path)
+    (pkg / "libfmt.12.dylib").write_bytes(b"MACHO_DATA_LIBFMT")
+
+    calls_list = []
+
+    def fake_run(cmd, **kwargs):
+        calls_list.append(list(cmd))
+        stdout = ""
+        if "otool" in cmd[0] and "-D" in cmd:
+            stdout = "/usr/local/lib/libfmt.12.dylib\n/usr/local/lib/libfmt.12.dylib"
+        elif "otool" in cmd[0] and "-L" in cmd:
+            stdout = "/usr/local/lib/libfmt.12.dylib (compatibility version 12.0.0)"
+        return subprocess.CompletedProcess(cmd, 0, stdout, "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    mangle_sonames(staging)
+
+    tools_used = [c[0] for c in calls_list]
+    assert "otool" in tools_used
+    assert "install_name_tool" in tools_used
+    it_subcommands = [c[1] for c in calls_list if c[0] == "install_name_tool"]
+    assert "-id" in it_subcommands
+    assert "-change" in it_subcommands
+
+
+def test_mangle_sonames_darwin_renames_dylib_with_hash(tmp_path, monkeypatch):
+    staging, pkg = _make_staging_with_extension(tmp_path)
+    (pkg / "libfmt.12.dylib").write_bytes(b"MACHO_DATA_LIBFMT")
+
+    def fake_run(cmd, **kwargs):
+        stdout = ""
+        if "otool" in cmd[0] and "-D" in cmd:
+            stdout = "/usr/local/lib/libfmt.12.dylib\n/usr/local/lib/libfmt.12.dylib"
+        return subprocess.CompletedProcess(cmd, 0, stdout, "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    mangle_sonames(staging)
+
+    names = [p.name for p in pkg.iterdir()]
+    assert not any(n == "libfmt.12.dylib" for n in names), "original dylib name should be gone"
+    assert any("libfmt-" in n and n.endswith(".dylib") for n in names), "mangled dylib name missing"
+
+
+def test_mangle_sonames_linux_mangles_unversioned_stub(tmp_path, monkeypatch):
+    """libfmt.so (unversioned linker stub) must be mangled, not treated as a Python extension."""
+    staging, pkg = _make_staging_with_extension(tmp_path)
+    (pkg / "libfmt.so").write_bytes(b"ELF_DATA_LIBFMT")
+
+    def fake_run(cmd, **kwargs):
+        stdout = "libfmt.so\n" if "--print-soname" in cmd else ""
+        return subprocess.CompletedProcess(cmd, 0, stdout, "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    mangle_sonames(staging)
+
+    names = [p.name for p in pkg.iterdir()]
+    assert not any(n == "libfmt.so" for n in names), "unversioned stub should be renamed"
+    assert any("libfmt-" in n and n.endswith(".so") for n in names), "mangled stub missing"
+
+
+def test_patch_rpath_ignores_lib_prefixed_bare_so(tmp_path, monkeypatch):
+    """libfoo.so (bare .so, lib prefix) must not be treated as a Python extension."""
+    staging = tmp_path / "staging"
+    pkg = staging / "mypkg"
+    pkg.mkdir(parents=True)
+    ext = f"_core{importlib.machinery.EXTENSION_SUFFIXES[0]}"
+    (pkg / ext).write_bytes(b"ext")
+    (pkg / "libfmt.so").write_bytes(b"stub")
+
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: calls.append(cmd) or subprocess.CompletedProcess(cmd, 0, b"", b""))
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    patch_rpath(staging)
+
+    patched = [c[-1] for c in calls]
+    assert not any("libfmt" in p for p in patched), "libfmt.so must not be patched as a Python extension"
+    assert any("_core" in p for p in patched), "_core extension must be patched"
+
+
+def test_patch_rpath_patches_lib_prefixed_abi_tagged_extension(tmp_path, monkeypatch):
+    """libxml2.cpython-312-x86_64-linux-gnu.so starts with 'lib' but is a Python extension."""
+    staging = tmp_path / "staging"
+    pkg = staging / "mypkg"
+    pkg.mkdir(parents=True)
+    abi_tag = importlib.machinery.EXTENSION_SUFFIXES[0]  # e.g. .cpython-312-x86_64-linux-gnu.so
+    (pkg / f"libxml2{abi_tag}").write_bytes(b"ext")
+
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: calls.append(cmd) or subprocess.CompletedProcess(cmd, 0, b"", b""))
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    patch_rpath(staging)
+
+    patched = [c[-1] for c in calls]
+    assert any("libxml2" in p for p in patched), "libxml2.cpython-*.so must be patched as a Python extension"
+
+
+def test_mangle_sonames_no_op_on_windows(tmp_path, monkeypatch):
+    staging, pkg = _make_staging_with_extension(tmp_path)
+    (pkg / "fmt.dll").write_bytes(b"PE_DATA")
+
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: calls.append(cmd) or subprocess.CompletedProcess(cmd, 0, "", ""))
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    mangle_sonames(staging)
+
+    assert calls == [], "no subprocess calls expected on Windows"

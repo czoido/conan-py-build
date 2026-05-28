@@ -4,10 +4,10 @@ project(myadder_cibw LANGUAGES CXX)
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
 set(PYBIND11_FINDPYTHON ON)
 find_package(pybind11 CONFIG REQUIRED)
-find_package(fmt REQUIRED)
+find_package(spdlog REQUIRED)
 
 pybind11_add_module(_core src/myadder.cpp)
-target_link_libraries(_core PRIVATE pybind11::module fmt::fmt)
+target_link_libraries(_core PRIVATE pybind11::module spdlog::spdlog)
 
 if(APPLE)
     set_target_properties(_core PROPERTIES LINK_FLAGS "-undefined dynamic_lookup")
