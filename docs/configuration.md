@@ -199,21 +199,21 @@ wheel `.dist-info/licenses/` and sdist PKG-INFO.
 
 ## Shared libraries
 
-The backend bundles Conan-provided shared libraries into
-the wheel and patches `$ORIGIN` / `@loader_path` RPATH
-on the extension module so it can find them at runtime.
+The backend automatically bundles Conan-provided shared
+libraries into the wheel, mangles their SONAMEs with a
+content hash (e.g. `libfmt.so.11` →
+`libfmt-0dc8c0ee.so.11`) to prevent runtime symbol
+conflicts, and patches `$ORIGIN` / `@loader_path` RPATH
+on the extension module so it resolves them at runtime.
+No configuration needed.
 
-If your dependency chain includes **OpenSSL**
-(e.g. via `libcurl`, `gRPC`, `libpq`), bundling without
-SONAME mangling can cause an `ImportError` at import
-time. Run the wheel-repair tool for your platform:
+Uses `patchelf` on Linux and `install_name_tool`/`otool`
+on macOS — install them if not already present
+(`apt install patchelf` / `brew install patchelf`).
 
-```bash
-# Linux
-pip wheel . -w dist/
-auditwheel repair dist/*.whl -w dist-repaired/
-pip install dist-repaired/*.whl
-```
+For distribution-grade wheels (manylinux policy
+compliance, wheel tag rewriting) you still want to run
+a wheel-repair tool after building:
 
 - **Linux** — [`auditwheel repair`](https://github.com/pypa/auditwheel)
 - **macOS** — [`delocate-wheel`](https://github.com/matthew-brett/delocate)
