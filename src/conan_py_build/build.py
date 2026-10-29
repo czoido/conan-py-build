@@ -794,6 +794,30 @@ def _build_wheel_with_tags(
     return wheel_name
 
 
+def _check_sdist_include(entry: str) -> None:
+    """An sdist.include entry must stay inside the project, or its files would get members
+    such as ``pkg-1.0/../x`` that pip refuses to extract. The check looks at the text and
+    not at the resolved path, so a symlink to a directory elsewhere still works."""
+    normalized = Path(os.path.normpath(entry))
+    if normalized.anchor or normalized.parts[:1] == (os.pardir,):
+        raise RuntimeError(f"[tool.conan-py-build.sdist].include must be inside project: {entry!r}")
+
+
+def _include_matches(source_dir: Path, entry: str) -> List[Path]:
+    """What an sdist include entry names, relative to the project: the path itself when it
+    exists, so names such as ``docs/[draft].md`` still work, or else what it matches as a
+    glob pattern (``*``, ``?``, ``[...]``, ``**``). A pattern ending in ``/`` matches only
+    directories, as Python 3.11+ does on its own."""
+    if (source_dir / entry).exists():
+        return [Path(entry)]
+    if any(char in entry for char in "*?["):
+        matches = source_dir.glob(entry)
+        if entry.endswith(("/", os.sep)):
+            matches = (path for path in matches if path.is_dir())
+        return sorted(path.relative_to(source_dir) for path in matches)
+    return []
+
+
 # FIXME: This implementation is too basic and needs improvement.
 def build_sdist(sdist_directory: str, config_settings: Optional[dict] = None) -> str:
     """
@@ -842,6 +866,10 @@ def build_sdist(sdist_directory: str, config_settings: Optional[dict] = None) ->
         "dist",
         "*.egg-info",
         ".eggs",
+        # Tool environments, which a glob such as "**/*.h" would otherwise reach into.
+        ".venv",
+        ".tox",
+        ".nox",
     ]
     sdist_md = dict(project_metadata)
     sdist_md["name"] = name
@@ -849,7 +877,11 @@ def build_sdist(sdist_directory: str, config_settings: Optional[dict] = None) ->
     std_meta_sdist = _get_standard_metadata(sdist_md, source_dir)
     pkg_info_content = str(std_meta_sdist.as_rfc822())
     license_paths_sdist = [p.as_posix() for p in (std_meta_sdist.license_files or [])]
-    include_patterns = default_include + sdist_config["include"]
+    # Checked before the tarball is opened, so an entry outside the project fails without
+    # leaving a partial sdist behind.
+    for entry in sdist_config["include"]:
+        _check_sdist_include(entry)
+    user_matches = [(entry, _include_matches(source_dir, entry)) for entry in sdist_config["include"]]
     exclude_patterns = default_exclude + sdist_config["exclude"]
 
     def should_exclude(path: Path) -> bool:
@@ -863,26 +895,33 @@ def build_sdist(sdist_directory: str, config_settings: Optional[dict] = None) ->
 
     added_arcnames = set()
 
+    def add_matches(tar: tarfile.TarFile, matches: List[Path]) -> int:
+        """Add each match, a file or a whole directory, and return how many files were not
+        excluded, counting those an earlier entry already added."""
+        kept = 0
+        for rel in matches:
+            source_path = source_dir / rel
+            files = source_path.rglob("*") if source_path.is_dir() else [source_path]
+            for file_path in files:
+                if not file_path.is_file() or should_exclude(file_path):
+                    continue
+                kept += 1
+                arcname = f"{sdist_name}/{file_path.relative_to(source_dir).as_posix()}"
+                if arcname not in added_arcnames:
+                    added_arcnames.add(arcname)
+                    tar.add(file_path, arcname=arcname)
+        return kept
+
     with tarfile.open(sdist_path, "w:gz", format=tarfile.PAX_FORMAT) as tar:
-        for pattern in include_patterns:
-            source_path = source_dir / pattern
-            if source_path.exists():
-                if source_path.is_file():
-                    if should_exclude(source_path):
-                        continue
-                    arcname = f"{sdist_name}/{Path(pattern).as_posix()}"
-                    if arcname not in added_arcnames:
-                        added_arcnames.add(arcname)
-                        tar.add(source_path, arcname=arcname)
-                elif source_path.is_dir():
-                    for file_path in source_path.rglob("*"):
-                        if file_path.is_file() and not should_exclude(file_path):
-                            rel_path = file_path.relative_to(source_dir)
-                            arcname = f"{sdist_name}/{rel_path.as_posix()}"
-                            if arcname in added_arcnames:
-                                continue
-                            added_arcnames.add(arcname)
-                            tar.add(file_path, arcname=arcname)
+        # Defaults missing from a project are fine. A user entry that adds nothing is
+        # likely a typo, or a path under a default exclusion such as build/.
+        for pattern in default_include:
+            add_matches(tar, _include_matches(source_dir, pattern))
+        for entry, matches in user_matches:
+            if not matches:
+                print(f"WARNING: sdist include entry {entry!r} matched nothing")
+            elif not add_matches(tar, matches):
+                print(f"WARNING: sdist include entry {entry!r} only matched excluded files")
 
         for rel_path_str in license_paths_sdist:
             src = source_dir / rel_path_str.replace("/", os.sep)

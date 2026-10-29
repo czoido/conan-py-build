@@ -30,7 +30,7 @@ All project-level options live under
 | `version.provider` | `[tool.conan-py-build.version]` | `"setuptools_scm"` for version from git tags | (none) |
 | `packages` | `[tool.conan-py-build.wheel]` | Paths to Python packages in the wheel | `["src/<name>"]` |
 | `exclude` | `[tool.conan-py-build.wheel]` | Glob patterns to drop files from the wheel | `[]` |
-| `include` / `exclude` | `[tool.conan-py-build.sdist]` | Glob patterns to add/remove from the sdist | `[]` / `[]` |
+| `include` / `exclude` | `[tool.conan-py-build.sdist]` | Paths or glob patterns to add to / remove from the sdist | `[]` / `[]` |
 
 Variants for extra profiles: `extra-profile-host`,
 `extra-profile-build`, `extra-profile-all`.
@@ -330,7 +330,8 @@ system's top-level file (`CMakeLists.txt`,
 `meson.build`), `cmake/`, `src/`, `include/`,
 README, LICENSE.
 Excluded: `__pycache__`, `*.pyc`, `.git`,
-`build`, `dist`, and compiled extensions
+`build`, `dist`, the tool environments `.venv`,
+`.tox` and `.nox`, and compiled extensions
 (`*.so`, `*.pyd`, `*.dylib`) left behind by an
 in-place or editable build.
 
@@ -343,15 +344,35 @@ recipe, and every `extra-profile` variant.
 
 Paths your *own* build reads, such as sources or
 patches outside `src/`, are still yours to add
-with `include`.
+with `include`. An entry is a path, a file or a
+whole directory, or a glob pattern relative to the
+project root: `include = ["patches/"]`,
+`include = ["patches/*.patch"]` and
+`include = ["third_party/**"]` all work. A
+directory a pattern matches goes in whole, and a
+pattern ending in `/` matches only directories.
 
-Patterns in `exclude` (and `include`) are matched against each file in two ways:
+An entry must stay inside the project, or the
+build fails. An entry that adds no files prints a
+warning, whether it matches nothing or only
+excluded files, such as anything under `build/`.
+
+Glob patterns in `include` follow Python's
+`Path.glob`, where `*` stays inside one directory:
+`src/*.h` takes the headers directly under `src/`,
+and `src/**/*.h` takes those in its subdirectories
+as well.
+
+Patterns in `exclude` are matched against each file in two ways:
 
 - Against the **full relative path** from the project root — so `src/binding/*.h`
   or `*.pyc` (which matches `src/foo.pyc`) work as expected.
 - Against **each path component individually** — so a bare name like `__pycache__`
   or `.git` excludes that directory wherever it appears in the tree, without
   needing a `**/__pycache__` pattern.
+
+In `exclude`, `*` also crosses `/`, so `src/*.h`
+drops `src/a/b.h` as well.
 
 ```toml
 [tool.conan-py-build.sdist]

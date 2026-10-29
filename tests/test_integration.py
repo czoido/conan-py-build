@@ -554,6 +554,75 @@ extra-profile = "profiles/cpp17.profile"
     assert "integration_pkg-0.1.0/profiles/cpp17.profile" in names
 
 
+def _sdist_included(tmp_path, monkeypatch, include, files):
+    """Build the sdist of a project with these sdist.include entries and these extra files,
+    and return the files that reached it."""
+    proj = tmp_path / "proj"
+    make_integration_project(proj, pyproject_toml=_DEFAULT_PYPROJECT + f"""
+[tool.conan-py-build.sdist]
+include = {include!r}
+""")
+    for rel in files:
+        (proj / rel).parent.mkdir(parents=True, exist_ok=True)
+        (proj / rel).write_text("x", encoding="utf-8")
+    monkeypatch.chdir(proj)
+    monkeypatch.setenv("CONAN_HOME", str(tmp_path / "conan_home"))
+
+    names = _sdist_names(tmp_path, "integration_pkg-0.1.0.tar.gz")
+    return [rel for rel in files if f"integration_pkg-0.1.0/{rel}" in names]
+
+
+def test_build_sdist_include_globs(tmp_path, monkeypatch):
+    """sdist.include takes glob patterns as well as paths: recipes/** brings a whole tree,
+    patches/*.patch only the patches, and docs/ the directory as before. An existing path
+    with glob characters in its name is taken as it is."""
+    included = _sdist_included(
+        tmp_path, monkeypatch, ["recipes/**", "patches/*.patch", "docs/", "notes/[draft].md"],
+        ["recipes/dep/config.yml", "recipes/dep/all/conanfile.py", "patches/fix.patch", "patches/notes.txt",
+         "docs/guide.md", "notes/[draft].md", "notes/d.md"])
+    assert included == ["recipes/dep/config.yml", "recipes/dep/all/conanfile.py", "patches/fix.patch", "docs/guide.md",
+                        "notes/[draft].md"]
+
+
+def test_build_sdist_include_glob_ending_in_slash_takes_only_directories(tmp_path, monkeypatch):
+    """recipes/*/ brings the directories under recipes/ and leaves its files out on every
+    Python version. Before 3.11, Path.glob ignored the trailing slash."""
+    included = _sdist_included(tmp_path, monkeypatch, ["recipes/*/"],
+                               ["recipes/README.md", "recipes/dep/config.yml"])
+    assert included == ["recipes/dep/config.yml"]
+
+
+def test_build_sdist_include_glob_skips_tool_environments(tmp_path, monkeypatch):
+    """**/*.h reaches every header in the project except those in .venv, .tox and .nox."""
+    included = _sdist_included(tmp_path, monkeypatch, ["**/*.h"],
+                               ["top.h", "third_party/lib.h", ".venv/inc/numpy.h", ".tox/py/a.h", ".nox/s/b.h"])
+    assert included == ["top.h", "third_party/lib.h"]
+
+
+def test_build_sdist_include_warns_when_an_entry_adds_nothing(tmp_path, monkeypatch, capfd):
+    """A user entry that matches nothing, or only files under a default exclusion, prints a
+    warning. Defaults the project lacks (README.rst, meson.build...) and an entry that
+    repeats one (src/) do not."""
+    _sdist_included(tmp_path, monkeypatch, ["recipe/**", "build/generated/*.h", "src/"],
+                    ["build/generated/config.h"])
+    warnings = [line for line in capfd.readouterr().out.splitlines() if "sdist include entry" in line]
+    assert warnings == [
+        "WARNING: sdist include entry 'recipe/**' matched nothing",
+        "WARNING: sdist include entry 'build/generated/*.h' only matched excluded files",
+    ]
+
+
+@pytest.mark.parametrize("entry", ["../x", "../*", "{outside}/x", "{outside}/*"])
+def test_build_sdist_include_outside_project_raises(tmp_path, monkeypatch, entry):
+    """An entry outside the project fails before the tarball is written. Before, ../x gave
+    a member pkg-0.1.0/../x that pip refuses to extract."""
+    (tmp_path / "x").write_text("x", encoding="utf-8")
+    entry = entry.format(outside=tmp_path.as_posix())
+    with pytest.raises(RuntimeError, match="must be inside project"):
+        _sdist_included(tmp_path, monkeypatch, [entry], [])
+    assert not list((tmp_path / "dist").iterdir())
+
+
 def test_build_sdist_excludes_compiled_extensions(tmp_path, monkeypatch):
     """Integration: a .so left by an in-place build does not reach the sdist."""
     proj = tmp_path / "proj"
