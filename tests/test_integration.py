@@ -584,14 +584,6 @@ def test_build_sdist_include_globs(tmp_path, monkeypatch):
                         "notes/[draft].md"]
 
 
-def test_build_sdist_include_glob_ending_in_slash_takes_only_directories(tmp_path, monkeypatch):
-    """recipes/*/ brings the directories under recipes/ and leaves its files out on every
-    Python version. Before 3.11, Path.glob ignored the trailing slash."""
-    included = _sdist_included(tmp_path, monkeypatch, ["recipes/*/"],
-                               ["recipes/README.md", "recipes/dep/config.yml"])
-    assert included == ["recipes/dep/config.yml"]
-
-
 def test_build_sdist_include_glob_skips_tool_environments(tmp_path, monkeypatch):
     """**/*.h reaches every header in the project except those in .venv, .tox and .nox."""
     included = _sdist_included(tmp_path, monkeypatch, ["**/*.h"],
@@ -607,8 +599,8 @@ def test_build_sdist_include_warns_when_an_entry_adds_nothing(tmp_path, monkeypa
                     ["build/generated/config.h"])
     warnings = [line for line in capfd.readouterr().out.splitlines() if "sdist include entry" in line]
     assert warnings == [
-        "WARNING: sdist include entry 'recipe/**' matched nothing",
-        "WARNING: sdist include entry 'build/generated/*.h' only matched excluded files",
+        "WARNING: sdist include entry 'recipe/**' added no files",
+        "WARNING: sdist include entry 'build/generated/*.h' added no files",
     ]
 
 

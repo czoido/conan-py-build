@@ -806,15 +806,11 @@ def _check_sdist_include(entry: str) -> None:
 def _include_matches(source_dir: Path, entry: str) -> List[Path]:
     """What an sdist include entry names, relative to the project: the path itself when it
     exists, so names such as ``docs/[draft].md`` still work, or else what it matches as a
-    glob pattern (``*``, ``?``, ``[...]``, ``**``). A pattern ending in ``/`` matches only
-    directories, as Python 3.11+ does on its own."""
+    glob pattern (``*``, ``?``, ``[...]``, ``**``)."""
     if (source_dir / entry).exists():
         return [Path(entry)]
     if any(char in entry for char in "*?["):
-        matches = source_dir.glob(entry)
-        if entry.endswith(("/", os.sep)):
-            matches = (path for path in matches if path.is_dir())
-        return sorted(path.relative_to(source_dir) for path in matches)
+        return sorted(path.relative_to(source_dir) for path in source_dir.glob(entry))
     return []
 
 
@@ -881,7 +877,6 @@ def build_sdist(sdist_directory: str, config_settings: Optional[dict] = None) ->
     # leaving a partial sdist behind.
     for entry in sdist_config["include"]:
         _check_sdist_include(entry)
-    user_matches = [(entry, _include_matches(source_dir, entry)) for entry in sdist_config["include"]]
     exclude_patterns = default_exclude + sdist_config["exclude"]
 
     def should_exclude(path: Path) -> bool:
@@ -917,11 +912,9 @@ def build_sdist(sdist_directory: str, config_settings: Optional[dict] = None) ->
         # likely a typo, or a path under a default exclusion such as build/.
         for pattern in default_include:
             add_matches(tar, _include_matches(source_dir, pattern))
-        for entry, matches in user_matches:
-            if not matches:
-                print(f"WARNING: sdist include entry {entry!r} matched nothing")
-            elif not add_matches(tar, matches):
-                print(f"WARNING: sdist include entry {entry!r} only matched excluded files")
+        for entry in sdist_config["include"]:
+            if not add_matches(tar, _include_matches(source_dir, entry)):
+                print(f"WARNING: sdist include entry {entry!r} added no files")
 
         for rel_path_str in license_paths_sdist:
             src = source_dir / rel_path_str.replace("/", os.sep)

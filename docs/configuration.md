@@ -349,19 +349,16 @@ whole directory, or a glob pattern relative to the
 project root: `include = ["patches/"]`,
 `include = ["patches/*.patch"]` and
 `include = ["third_party/**"]` all work. A
-directory a pattern matches goes in whole, and a
-pattern ending in `/` matches only directories.
+directory a pattern matches goes in whole.
 
 An entry must stay inside the project, or the
 build fails. An entry that adds no files prints a
 warning, whether it matches nothing or only
 excluded files, such as anything under `build/`.
 
-Glob patterns in `include` follow Python's
-`Path.glob`, where `*` stays inside one directory:
-`src/*.h` takes the headers directly under `src/`,
-and `src/**/*.h` takes those in its subdirectories
-as well.
+In `include`, `*` stays inside one directory
+(`src/*.h` takes only the headers directly under
+`src/`), while in `exclude` it also crosses `/`.
 
 Patterns in `exclude` are matched against each file in two ways:
 
@@ -370,9 +367,6 @@ Patterns in `exclude` are matched against each file in two ways:
 - Against **each path component individually** — so a bare name like `__pycache__`
   or `.git` excludes that directory wherever it appears in the tree, without
   needing a `**/__pycache__` pattern.
-
-In `exclude`, `*` also crosses `/`, so `src/*.h`
-drops `src/a/b.h` as well.
 
 ```toml
 [tool.conan-py-build.sdist]
