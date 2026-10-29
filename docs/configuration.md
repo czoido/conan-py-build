@@ -30,7 +30,7 @@ All project-level options live under
 | `version.provider` | `[tool.conan-py-build.version]` | `"setuptools_scm"` for version from git tags | (none) |
 | `packages` | `[tool.conan-py-build.wheel]` | Paths to Python packages in the wheel | `["src/<name>"]` |
 | `exclude` | `[tool.conan-py-build.wheel]` | Glob patterns to drop files from the wheel | `[]` |
-| `include` / `exclude` | `[tool.conan-py-build.sdist]` | Paths or glob patterns to add to / remove from the sdist | `[]` / `[]` |
+| `include` / `exclude` | `[tool.conan-py-build.sdist]` | Glob patterns to add/remove from the sdist | `[]` / `[]` |
 
 Variants for extra profiles: `extra-profile-host`,
 `extra-profile-build`, `extra-profile-all`.
