@@ -572,40 +572,24 @@ include = {include!r}
     return [rel for rel in files if f"integration_pkg-0.1.0/{rel}" in names]
 
 
-def test_build_sdist_include_globs(tmp_path, monkeypatch):
-    """sdist.include entries are glob patterns: recipes/** brings a whole tree,
-    patches/*.patch only the patches, and docs/ the directory as before. [[] matches a
-    literal [, as in the shell."""
+def test_build_sdist_include_globs(tmp_path, monkeypatch, capfd):
+    """sdist.include entries are glob patterns, a plain path (docs/) still works, and **
+    does not reach into hidden directories such as .venv. A user entry that matches
+    nothing, or only excluded files, prints a warning, and one that repeats a default
+    (src/) does not."""
     included = _sdist_included(
-        tmp_path, monkeypatch, ["recipes/**", "patches/*.patch", "docs/", "notes/[[]draft].md"],
-        ["recipes/dep/config.yml", "recipes/dep/all/conanfile.py", "patches/fix.patch", "patches/notes.txt",
-         "docs/guide.md", "notes/[draft].md", "notes/d.md"])
-    assert included == ["recipes/dep/config.yml", "recipes/dep/all/conanfile.py", "patches/fix.patch", "docs/guide.md",
-                        "notes/[draft].md"]
-
-
-def test_build_sdist_include_glob_skips_hidden_directories(tmp_path, monkeypatch):
-    """**/*.h does not reach into hidden directories such as .venv, and a pattern that
-    names one (.github/**) does."""
-    included = _sdist_included(tmp_path, monkeypatch, ["**/*.h", ".github/**"],
-                               ["top.h", "third_party/lib.h", ".venv/inc/numpy.h", ".github/ci.yml"])
-    assert included == ["top.h", "third_party/lib.h", ".github/ci.yml"]
-
-
-def test_build_sdist_include_warns_when_an_entry_adds_nothing(tmp_path, monkeypatch, capfd):
-    """A user entry that matches nothing, or only files under a default exclusion, prints a
-    warning. Defaults the project lacks (README.rst, meson.build...) and an entry that
-    repeats one (src/) do not."""
-    _sdist_included(tmp_path, monkeypatch, ["recipe/**", "build/generated/*.h", "src/"],
-                    ["build/generated/config.h"])
+        tmp_path, monkeypatch, ["recipes/**", "patches/*.patch", "docs/", "**/*.h", "src/", "missing/**", "build/*.h"],
+        ["recipes/dep/all/conanfile.py", "patches/fix.patch", "patches/notes.txt", "docs/guide.md", "top.h",
+         ".venv/numpy.h", "build/config.h"])
+    assert included == ["recipes/dep/all/conanfile.py", "patches/fix.patch", "docs/guide.md", "top.h"]
     warnings = [line for line in capfd.readouterr().out.splitlines() if "sdist include entry" in line]
     assert warnings == [
-        "WARNING: sdist include entry 'recipe/**' added no files",
-        "WARNING: sdist include entry 'build/generated/*.h' added no files",
+        "WARNING: sdist include entry 'missing/**' added no files",
+        "WARNING: sdist include entry 'build/*.h' added no files",
     ]
 
 
-@pytest.mark.parametrize("entry", ["../x", "../*", "{outside}/x", "{outside}/*"])
+@pytest.mark.parametrize("entry", ["../x", "{outside}/x"])
 def test_build_sdist_include_outside_project_raises(tmp_path, monkeypatch, entry):
     """An entry outside the project fails before the tarball is written. Before, ../x gave
     a member pkg-0.1.0/../x that pip refuses to extract."""

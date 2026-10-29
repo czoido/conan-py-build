@@ -348,16 +348,20 @@ relative to the project root, and a plain path is
 a pattern that matches itself:
 `include = ["patches/"]`,
 `include = ["patches/*.patch"]` and
-`include = ["third_party/**"]` all work. A
-directory a pattern matches goes in whole.
+`include = ["third_party/**"]` all work.
 
 The patterns work as in the shell. `*` stays
 inside one directory, so `src/*.h` takes only the
-headers directly under `src/`. `*` and `**` skip
-hidden files and directories such as `.venv`
-unless the pattern names them, as
+headers directly under `src/`. `*` and `**` do
+not match hidden files and directories such as
+`.venv` unless the pattern names them, as
 `.github/**` does. To match a literal `[`, write
 `[[]`.
+
+A directory that a pattern matches goes in whole,
+hidden files included. `**` on its own matches
+the project root, so it takes everything that is
+not excluded, `.venv` too.
 
 An entry must stay inside the project, or the
 build fails. An entry that adds no files prints a
