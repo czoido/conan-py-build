@@ -573,22 +573,23 @@ include = {include!r}
 
 
 def test_build_sdist_include_globs(tmp_path, monkeypatch):
-    """sdist.include takes glob patterns as well as paths: recipes/** brings a whole tree,
-    patches/*.patch only the patches, and docs/ the directory as before. An existing path
-    with glob characters in its name is taken as it is."""
+    """sdist.include entries are glob patterns: recipes/** brings a whole tree,
+    patches/*.patch only the patches, and docs/ the directory as before. [[] matches a
+    literal [, as in the shell."""
     included = _sdist_included(
-        tmp_path, monkeypatch, ["recipes/**", "patches/*.patch", "docs/", "notes/[draft].md"],
+        tmp_path, monkeypatch, ["recipes/**", "patches/*.patch", "docs/", "notes/[[]draft].md"],
         ["recipes/dep/config.yml", "recipes/dep/all/conanfile.py", "patches/fix.patch", "patches/notes.txt",
          "docs/guide.md", "notes/[draft].md", "notes/d.md"])
     assert included == ["recipes/dep/config.yml", "recipes/dep/all/conanfile.py", "patches/fix.patch", "docs/guide.md",
                         "notes/[draft].md"]
 
 
-def test_build_sdist_include_glob_skips_tool_environments(tmp_path, monkeypatch):
-    """**/*.h reaches every header in the project except those in .venv, .tox and .nox."""
-    included = _sdist_included(tmp_path, monkeypatch, ["**/*.h"],
-                               ["top.h", "third_party/lib.h", ".venv/inc/numpy.h", ".tox/py/a.h", ".nox/s/b.h"])
-    assert included == ["top.h", "third_party/lib.h"]
+def test_build_sdist_include_glob_skips_hidden_directories(tmp_path, monkeypatch):
+    """**/*.h does not reach into hidden directories such as .venv, and a pattern that
+    names one (.github/**) does."""
+    included = _sdist_included(tmp_path, monkeypatch, ["**/*.h", ".github/**"],
+                               ["top.h", "third_party/lib.h", ".venv/inc/numpy.h", ".github/ci.yml"])
+    assert included == ["top.h", "third_party/lib.h", ".github/ci.yml"]
 
 
 def test_build_sdist_include_warns_when_an_entry_adds_nothing(tmp_path, monkeypatch, capfd):

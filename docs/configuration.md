@@ -330,8 +330,7 @@ system's top-level file (`CMakeLists.txt`,
 `meson.build`), `cmake/`, `src/`, `include/`,
 README, LICENSE.
 Excluded: `__pycache__`, `*.pyc`, `.git`,
-`build`, `dist`, the tool environments `.venv`,
-`.tox` and `.nox`, and compiled extensions
+`build`, `dist`, and compiled extensions
 (`*.so`, `*.pyd`, `*.dylib`) left behind by an
 in-place or editable build.
 
@@ -344,21 +343,26 @@ recipe, and every `extra-profile` variant.
 
 Paths your *own* build reads, such as sources or
 patches outside `src/`, are still yours to add
-with `include`. An entry is a path, a file or a
-whole directory, or a glob pattern relative to the
-project root: `include = ["patches/"]`,
+with `include`. Each entry is a glob pattern
+relative to the project root, and a plain path is
+a pattern that matches itself:
+`include = ["patches/"]`,
 `include = ["patches/*.patch"]` and
 `include = ["third_party/**"]` all work. A
 directory a pattern matches goes in whole.
+
+The patterns work as in the shell. `*` stays
+inside one directory, so `src/*.h` takes only the
+headers directly under `src/`. `*` and `**` skip
+hidden files and directories such as `.venv`
+unless the pattern names them, as
+`.github/**` does. To match a literal `[`, write
+`[[]`.
 
 An entry must stay inside the project, or the
 build fails. An entry that adds no files prints a
 warning, whether it matches nothing or only
 excluded files, such as anything under `build/`.
-
-In `include`, `*` stays inside one directory
-(`src/*.h` takes only the headers directly under
-`src/`), while in `exclude` it also crosses `/`.
 
 Patterns in `exclude` are matched against each file in two ways:
 
@@ -367,6 +371,9 @@ Patterns in `exclude` are matched against each file in two ways:
 - Against **each path component individually** — so a bare name like `__pycache__`
   or `.git` excludes that directory wherever it appears in the tree, without
   needing a `**/__pycache__` pattern.
+
+Unlike in `include`, `*` here also crosses `/`, so
+`src/*.h` drops `src/a/b.h` as well.
 
 ```toml
 [tool.conan-py-build.sdist]

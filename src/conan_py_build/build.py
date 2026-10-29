@@ -1,5 +1,6 @@
 import ast
 import fnmatch
+import glob
 import io
 import os
 import shutil
@@ -803,15 +804,15 @@ def _check_sdist_include(entry: str) -> None:
         raise RuntimeError(f"[tool.conan-py-build.sdist].include must be inside project: {entry!r}")
 
 
-def _include_matches(source_dir: Path, entry: str) -> List[Path]:
-    """What an sdist include entry names, relative to the project: the path itself when it
-    exists, so names such as ``docs/[draft].md`` still work, or else what it matches as a
-    glob pattern (``*``, ``?``, ``[...]``, ``**``)."""
-    if (source_dir / entry).exists():
-        return [Path(entry)]
-    if any(char in entry for char in "*?["):
-        return sorted(path.relative_to(source_dir) for path in source_dir.glob(entry))
-    return []
+def _include_matches(source_dir: Path, pattern: str) -> List[Path]:
+    """What an sdist.include glob pattern matches, relative to the project. A plain path is
+    a pattern that matches itself. As in the shell, ``*`` and ``**`` skip hidden files and
+    directories unless the pattern names them, and ``[[]`` matches a literal ``[``.
+
+    The glob module, unlike ``Path.glob``, gives the same results on every supported
+    Python for ``**``, a trailing ``/`` and ``.``."""
+    matches = glob.glob(os.path.join(glob.escape(str(source_dir)), pattern), recursive=True)
+    return sorted(Path(match).relative_to(source_dir) for match in matches)
 
 
 # FIXME: This implementation is too basic and needs improvement.
@@ -862,10 +863,6 @@ def build_sdist(sdist_directory: str, config_settings: Optional[dict] = None) ->
         "dist",
         "*.egg-info",
         ".eggs",
-        # Tool environments, which a glob such as "**/*.h" would otherwise reach into.
-        ".venv",
-        ".tox",
-        ".nox",
     ]
     sdist_md = dict(project_metadata)
     sdist_md["name"] = name
@@ -908,10 +905,12 @@ def build_sdist(sdist_directory: str, config_settings: Optional[dict] = None) ->
         return kept
 
     with tarfile.open(sdist_path, "w:gz", format=tarfile.PAX_FORMAT) as tar:
-        # Defaults missing from a project are fine. A user entry that adds nothing is
-        # likely a typo, or a path under a default exclusion such as build/.
-        for pattern in default_include:
-            add_matches(tar, _include_matches(source_dir, pattern))
+        # Defaults are paths, and missing ones are fine. User entries are patterns, and one
+        # that adds nothing is likely a typo, or a path under a default exclusion such as
+        # build/.
+        for path in default_include:
+            if (source_dir / path).exists():
+                add_matches(tar, [Path(path)])
         for entry in sdist_config["include"]:
             if not add_matches(tar, _include_matches(source_dir, entry)):
                 print(f"WARNING: sdist include entry {entry!r} added no files")
