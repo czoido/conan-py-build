@@ -160,6 +160,83 @@ or `CONAN_HOME` / `.conanrc`). Set
 `CONAN_PY_BUILD_PROFILE_AUTODETECT=1` to autodetect
 the profile instead of requiring `default`.
 
+## Editable installs
+
+`pip install -e .` (or `uv pip install -e .`, or a
+`uv run` in the project) builds the project with Conan as
+for a wheel, then leaves what `package()` installs into
+each Python package's folder next to that package's
+sources, such as `src/mypackage/_core.cpython-312-darwin.so`.
+The installed `.pth` file puts the folders holding the
+packages on `sys.path`, so changes to Python files and
+other package data apply without reinstalling. After
+changing compiled code, run the editable install again.
+Whatever `package()` installs outside the packages, such
+as a top-level module, is installed as usual.
+
+Add the compiled files to `.gitignore`. They never reach
+the sdist, and a normal wheel takes its compiled modules
+from `package()`, not from the sources. Other files that
+`package()` generates into a package, such as `.pyi`
+stubs, also land in the sources. The sdist takes those
+like any other source file, so list them in
+`sdist.exclude` if they should not ship there.
+
+Each editable install also removes the files that hold a
+module it places under another suffix the running Python
+imports. Python tries those suffixes in a fixed order, so
+a `_core.cpython-312-darwin.so` left by an earlier install
+would keep loading over a new `_core.abi3.so`. Modules
+built for other Python versions stay.
+
+A reinstall writes each module to a new file instead of
+over the old one. On macOS, rewriting a module that a
+running process has loaded crashes the next process that
+loads it. On Windows a loaded `.pyd` cannot be replaced,
+so the install fails until those processes stop.
+
+`pip uninstall` leaves the files placed in the sources.
+Deleting them, for example with `git clean -xdf`, breaks
+the installed package until the editable install runs
+again (`uv sync --reinstall-package <name>` with uv).
+
+With a flat layout, where the package lives at the
+project root, the root itself goes on `sys.path` and
+everything in it becomes importable, `conanfile.py`
+included. A `src/` layout avoids that.
+
+### Editable installs with shared libraries
+
+The editable module finds shared dependencies through its
+RPATH to `build/.conan-libs` (see
+[Shared libraries](#shared-libraries)). Every build
+recreates that folder, so a later `pip wheel .` leaves the
+editable install using that build's libraries, and
+deleting `build/` breaks it. Windows has no RPATH, and
+Python does not search `PATH` for the DLLs an extension
+needs, so on Windows an editable install only works with
+static dependencies.
+
+### Rebuilding with uv
+
+uv rebuilds a local project only when one of its
+`cache-keys` changes, and by default it only watches
+`pyproject.toml`, `setup.py` and `setup.cfg`. List the C++
+sources and the recipe too, so that `uv run` and `uv sync`
+rebuild after you change them. Your list replaces uv's
+defaults, so keep `pyproject.toml` in it:
+
+```toml
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "conanfile.py" },
+    { file = "CMakeLists.txt" },
+    { file = "src/**/*.cpp" },
+    { file = "src/**/*.hpp" },
+]
+```
+
 ## Extra Conan arguments
 
 CLI flags appended to `conan build` and
@@ -367,6 +444,10 @@ exclude = ["binding/*.cpp", "binding/*.h"]
 
 Patterns are relative to each package root and use the same `.gitignore`
 syntax as the sdist options (see [Sdist defaults](#sdist-defaults)).
+
+Compiled extensions in the package sources (`*.so`, `*.pyd`, `*.dylib`),
+such as the ones an [editable install](#editable-installs) leaves there,
+are always left out. The wheel takes its compiled modules from `package()`.
 
 ## Sdist defaults
 

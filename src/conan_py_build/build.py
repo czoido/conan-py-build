@@ -1,12 +1,13 @@
 import ast
 import functools
+import importlib.machinery
 import io
 import os
 import shutil
 import sys
 import tarfile
 import tempfile
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -26,6 +27,9 @@ try:
     import tomllib
 except ImportError:
     import tomli as tomllib
+
+# What an in-place or editable build leaves next to the sources
+_COMPILED_EXTENSIONS = ["*.so", "*.pyd", "*.dylib"]
 
 
 def _get_wheel_tags() -> dict:
@@ -551,6 +555,11 @@ def get_requires_for_build_sdist(config_settings: Optional[dict] = None) -> list
     return []
 
 
+def get_requires_for_build_editable(config_settings: Optional[dict] = None) -> list:
+    """PEP 660 hook: Return additional dependencies needed to build an editable wheel."""
+    return get_requires_for_build_wheel(config_settings)
+
+
 def prepare_metadata_for_build_wheel(
     metadata_directory: str,
     config_settings: Optional[dict] = None,
@@ -578,6 +587,14 @@ def prepare_metadata_for_build_wheel(
     return dist_info_dir.name
 
 
+def prepare_metadata_for_build_editable(
+    metadata_directory: str,
+    config_settings: Optional[dict] = None,
+) -> str:
+    """PEP 660 hook: Prepare editable wheel metadata, the same as for a normal wheel."""
+    return prepare_metadata_for_build_wheel(metadata_directory, config_settings)
+
+
 def build_wheel(
     wheel_directory: str,
     config_settings: Optional[dict] = None,
@@ -591,7 +608,33 @@ def build_wheel(
     and RECORD are still written by distlib during wheel packaging. Wheel tags
     are always recomputed inside VirtualBuildEnv.
     """
+    return _build(wheel_directory, config_settings, metadata_directory, editable=False)
 
+
+def build_editable(
+    wheel_directory: str,
+    config_settings: Optional[dict] = None,
+    metadata_directory: Optional[str] = None,
+) -> str:
+    """
+    PEP 660 hook: Build an editable wheel.
+
+    Conan builds the project as for a normal wheel, but what ``package()`` installs into a
+    Python package's folder is copied next to that package's sources instead, an in-place
+    build. The wheel carries a ``.pth`` file that puts the folders holding the packages on
+    ``sys.path``, plus whatever ``package()`` installs outside them. Edits to Python files
+    and other package data apply at once. Changes to compiled code need the editable
+    install to run again.
+    """
+    return _build(wheel_directory, config_settings, metadata_directory, editable=True)
+
+
+def _build(
+    wheel_directory: str,
+    config_settings: Optional[dict],
+    metadata_directory: Optional[str],
+    editable: bool,
+) -> str:
     wheel_dir = Path(wheel_directory)
     wheel_dir.mkdir(parents=True, exist_ok=True)
 
@@ -600,7 +643,7 @@ def build_wheel(
     version = _resolve_version(project_metadata, source_dir)
     name = _normalize_name(project_metadata.get("name", "unknown"))
 
-    print(f"Building wheel for {name}...")
+    print(f"Building {'editable ' if editable else ''}wheel for {name}...")
 
     config = _parse_config(config_settings)
 
@@ -614,19 +657,8 @@ def build_wheel(
             project_metadata,
             config,
             metadata_directory,
+            editable,
         )
-
-
-def build_editable(
-    wheel_directory: str,
-    config_settings: Optional[dict] = None,
-    metadata_directory: Optional[str] = None,
-) -> str:
-    """
-    PEP 660 hook: Build an editable wheel.
-    """
-    print("WARNING: Editable install: building a normal wheel (no live reload of C++ extensions).")
-    return build_wheel(wheel_directory, config_settings, metadata_directory)
 
 
 def _check_wheel_package_path(source_dir: Path, wheel_package: str) -> Path:
@@ -671,8 +703,9 @@ def _do_build_wheel(
     project_metadata: dict,
     config: dict,
     metadata_directory: Optional[str] = None,
+    editable: bool = False,
 ) -> str:
-    """Internal function that performs the actual wheel build."""
+    """Internal function that performs the actual wheel build, editable or not."""
 
     # Keep Conan's output folder separate from the wheel platlib so the build
     # tree doesn't land inside the wheel regardless of the build system used.
@@ -770,12 +803,16 @@ def _do_build_wheel(
     except Exception as e:
         raise RuntimeError(f"Conan build failed: {e}") from e
 
-    wheel_exclude = _get_wheel_config(source_dir)["exclude"]
-    for python_package_dir in _get_wheel_packages(source_dir, name):
-        package_dir = staging_dir / python_package_dir.name
-        package_dir.mkdir(parents=True, exist_ok=True)
-        ignore = _make_wheel_ignore(wheel_exclude, python_package_dir) if wheel_exclude else None
-        shutil.copytree(python_package_dir, package_dir, dirs_exist_ok=True, ignore=ignore)
+    python_package_dirs = _get_wheel_packages(source_dir, name)
+    if not editable:
+        # Compiled extensions come from package() below. Any in the sources were left there by
+        # an editable install, maybe for another Python, and don't belong in this wheel.
+        wheel_exclude = _get_wheel_config(source_dir)["exclude"] + _COMPILED_EXTENSIONS
+        for python_package_dir in python_package_dirs:
+            package_dir = staging_dir / python_package_dir.name
+            package_dir.mkdir(parents=True, exist_ok=True)
+            ignore = _make_wheel_ignore(wheel_exclude, python_package_dir)
+            shutil.copytree(python_package_dir, package_dir, dirs_exist_ok=True, ignore=ignore)
 
     print("Running conan export-pkg...", flush=True)
     
@@ -820,6 +857,9 @@ def _do_build_wheel(
     # Absolute RPATHs to .conan-libs/ let repair tools discover and bundle the deployed libs.
     _set_deploy_rpath(staging_dir, runtime_deploy_dir)
 
+    if editable:
+        _place_in_source(staging_dir, python_package_dirs, name)
+
     # Create dist-info (or reuse the one prepared by prepare_metadata_for_build_wheel)
     if metadata_directory is not None:
         src = Path(metadata_directory)  # PEP 517: metadata_directory is the .dist-info path itself
@@ -837,6 +877,71 @@ def _do_build_wheel(
         wheel_name = _build_wheel_with_tags(wheel_dir, staging_dir, name, version, tags)
 
     return wheel_name
+
+
+def _place_in_source(staging_dir: Path, python_package_dirs: List[Path], name: str) -> None:
+    """Turn the staging dir into an editable install.
+
+    What package() put in each Python package's folder moves next to that package's sources,
+    and a .pth file puts the folders holding the packages on sys.path. The rest of the
+    staging dir, such as a top-level extension module, stays to be installed as usual.
+    """
+    for python_package_dir in python_package_dirs:
+        built = staging_dir / python_package_dir.name
+        if built.is_dir():
+            print(f"Editable install: placing the built files of {built.name} in {python_package_dir}", flush=True)
+            try:
+                _remove_shadowing_modules(built, python_package_dir)
+                shutil.copytree(built, python_package_dir, dirs_exist_ok=True, copy_function=_replace_file)
+            except OSError as e:
+                raise RuntimeError(
+                    f"Editable install: could not replace the built files in {python_package_dir}. "
+                    f"On Windows, stop any Python process that has them loaded and try again: {e}"
+                ) from e
+            shutil.rmtree(built)
+    # Ordered and without repeats, for packages that share a parent such as src/
+    parents = list(dict.fromkeys(str(p.parent) for p in python_package_dirs))
+    if parents:
+        (staging_dir / f"__editable__.{name}.pth").write_text("\n".join(parents) + "\n", encoding="utf-8")
+
+
+def _extension_module_name(filename: str) -> Optional[str]:
+    """The module name of an extension module file this interpreter imports, or None.
+
+    Longer suffixes are tried first, so ``_core.abi3.so`` gives ``_core`` and not ``_core.abi3``.
+    """
+    for suffix in sorted(importlib.machinery.EXTENSION_SUFFIXES, key=len, reverse=True):
+        if filename.endswith(suffix):
+            return filename[:-len(suffix)]
+    return None
+
+
+def _remove_shadowing_modules(built: Path, python_package_dir: Path) -> None:
+    """Remove, for each extension module in ``built``, the files in the sources that hold the
+    same module under another suffix this interpreter imports.
+
+    Python tries the suffixes in a fixed order, so a ``_core.cpython-312-darwin.so`` left by an
+    earlier editable install keeps loading over a new ``_core.abi3.so``. Modules for other
+    Pythons, such as ``_core.cpython-311-darwin.so``, stay.
+    """
+    for module in built.rglob("*"):
+        module_name = _extension_module_name(module.name)
+        if module_name is None or not module.is_file():
+            continue
+        target_dir = python_package_dir / module.parent.relative_to(built)
+        for suffix in importlib.machinery.EXTENSION_SUFFIXES:
+            sibling = target_dir / f"{module_name}{suffix}"
+            if sibling.name != module.name and sibling.is_file():
+                print(f"Editable install: removing {sibling}, which would shadow {module.name}", flush=True)
+                sibling.unlink()
+
+
+def _replace_file(src: str, dst: str) -> str:
+    """``shutil.copy2`` into a new file rather than over the old one. On macOS, a module
+    rewritten in place while a process has it loaded kills the next process that loads it."""
+    with suppress(FileNotFoundError):
+        os.unlink(dst)
+    return shutil.copy2(src, dst)
 
 
 def _build_wheel_with_tags(
@@ -895,9 +1000,7 @@ def build_sdist(sdist_directory: str, config_settings: Optional[dict] = None) ->
         "*.pyo",
         # Compiled extensions from an in-place or editable build. The sdist exists to
         # rebuild them, and shipping one pins the tarball to one platform.
-        "*.so",
-        "*.pyd",
-        "*.dylib",
+        *_COMPILED_EXTENSIONS,
         ".git",
         ".gitignore",
         "build",

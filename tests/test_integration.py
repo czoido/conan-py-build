@@ -1,4 +1,5 @@
 """Integration tests: run real PEP 517 hooks (build_sdist, build_wheel) on a project layout."""
+import importlib.machinery
 import os
 import subprocess
 import sys
@@ -9,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from conan_py_build.build import build_sdist, build_wheel, prepare_metadata_for_build_wheel
+from conan_py_build.build import build_editable, build_sdist, build_wheel, prepare_metadata_for_build_wheel
 
 
 _DEFAULT_PYPROJECT = """\
@@ -743,3 +744,99 @@ class Pkg(ConanFile):
     assert "flatmod" in names
     assert not [n for n in names if n.startswith("integration_pkg/")]
     assert any(n.endswith(".dist-info/METADATA") for n in names)
+
+
+# The last suffix is the plain one (.so, or .pyd on Windows), which this interpreter imports
+_EDITABLE_MODULE = "_core" + importlib.machinery.EXTENSION_SUFFIXES[-1]
+
+# package() installs a stand-in for a compiled module into the package, and a file outside it
+_EDITABLE_CONANFILE = f"""\
+from conan import ConanFile
+from conan.tools.files import save
+
+
+class Pkg(ConanFile):
+    name = "integration_pkg"
+    settings = "os", "compiler", "build_type", "arch"
+
+    def package(self):
+        save(self, self.package_folder + "/integration_pkg/{_EDITABLE_MODULE}", "compiled")
+        save(self, self.package_folder + "/toplevel_mod.so", "compiled too")
+"""
+
+
+def _editable_project(tmp_path, monkeypatch) -> Path:
+    proj = tmp_path / "proj"
+    make_integration_project(proj, conanfile=_EDITABLE_CONANFILE, init_content="VALUE = 1\n")
+    monkeypatch.chdir(proj)
+    monkeypatch.setenv("CONAN_HOME", str(tmp_path / "conan_home"))
+    return proj
+
+
+def test_build_editable_places_built_files_in_source(tmp_path, monkeypatch):
+    """The editable wheel points at the sources, and the built module sits next to them."""
+    proj = _editable_project(tmp_path, monkeypatch)
+    wheel_dir = tmp_path / "dist"
+    wheel_dir.mkdir()
+    wheel_name = build_editable(str(wheel_dir), config_settings=None)
+
+    assert (proj / "src" / "integration_pkg" / _EDITABLE_MODULE).read_text() == "compiled"
+    with zipfile.ZipFile(wheel_dir / wheel_name) as zf:
+        names = zf.namelist()
+        pth = zf.read("__editable__.integration_pkg.pth").decode()
+    assert pth.splitlines() == [str((proj / "src").resolve())]
+    # The package itself comes from the sources, what package() installs outside it from the wheel
+    assert not [n for n in names if n.startswith("integration_pkg/")]
+    assert "toplevel_mod.so" in names
+
+
+def test_build_editable_again_writes_a_new_file(tmp_path, monkeypatch):
+    """A second editable install replaces the built module with a new file instead of rewriting
+    the old one, which on macOS kills the next process to load it while another has it loaded."""
+    proj = _editable_project(tmp_path, monkeypatch)
+    wheel_dir = tmp_path / "dist"
+    wheel_dir.mkdir()
+    build_editable(str(wheel_dir), config_settings=None)
+    module = proj / "src" / "integration_pkg" / _EDITABLE_MODULE
+    # A hard link stands for the process that still maps the first build
+    loaded = tmp_path / "loaded.so"
+    os.link(module, loaded)
+    build_editable(str(wheel_dir), config_settings=None)
+
+    assert not module.samefile(loaded)
+    assert module.read_text() == "compiled"
+
+
+def test_build_editable_removes_modules_that_would_shadow_the_new_one(tmp_path, monkeypatch):
+    """A module an earlier editable install left under a suffix Python tries first is removed,
+    so the new build is the one imported. Modules for other Pythons stay."""
+    proj = _editable_project(tmp_path, monkeypatch)
+    package = proj / "src" / "integration_pkg"
+    stale = package / ("_core" + importlib.machinery.EXTENSION_SUFFIXES[0])
+    stale.write_text("earlier build")
+    other_python = package / "_core.cpython-39-x.so"
+    other_python.write_text("from another python")
+    wheel_dir = tmp_path / "dist"
+    wheel_dir.mkdir()
+    build_editable(str(wheel_dir), config_settings=None)
+
+    assert not stale.exists()
+    assert other_python.read_text() == "from another python"
+    assert (package / _EDITABLE_MODULE).read_text() == "compiled"
+
+
+def test_build_editable_then_wheel_leaves_in_place_module_out(tmp_path, monkeypatch):
+    """A module an editable install left in the sources is not copied into a later normal wheel,
+    which gets the one package() installs."""
+    proj = _editable_project(tmp_path, monkeypatch)
+    (proj / "src" / "integration_pkg" / "_core.cpython-39-darwin.so").write_text("from another python")
+    wheel_dir = tmp_path / "dist"
+    wheel_dir.mkdir()
+    build_editable(str(wheel_dir), config_settings=None)
+    wheel_name = build_wheel(str(wheel_dir), config_settings=None)
+
+    with zipfile.ZipFile(wheel_dir / wheel_name) as zf:
+        names = zf.namelist()
+        assert zf.read(f"integration_pkg/{_EDITABLE_MODULE}").decode() == "compiled"
+    assert "integration_pkg/__init__.py" in names
+    assert "integration_pkg/_core.cpython-39-darwin.so" not in names
